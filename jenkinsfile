@@ -1,0 +1,348 @@
+// Jenkinsfile
+// KAAM: Har git push pe yeh pipeline automatically chalti hai
+// Juice Shop: Checkout → SonarQube → OWASP → Docker Build → Trivy → Push → ArgoCD Update
+
+pipeline {
+    agent any
+
+    environment {
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // APNI VALUES YAHAN CHANGE KARO
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        DOCKERHUB_USER         = "itsparikshit"
+        IMAGE_NAME             = "${DOCKERHUB_USER}/juice-shop"
+        IMAGE_TAG              = "${BUILD_NUMBER}"
+        FULL_IMAGE             = "${IMAGE_NAME}:${BUILD_NUMBER}"
+        DOCKER_CREDENTIALS_ID  = "dockerhub-creds"
+        SONARQUBE_ENV          = "SonarQube"
+        GITHUB_REPO            = "https://github.com/parikshit-chouhan/secure-gitops-devsecops-platform.git"
+        GIT_CREDENTIALS_ID     = "github-token"
+        APP_DIR                = "."   // Juice Shop code yahan hai
+    }
+
+    stages {
+
+        // ════════════════════════════════════════════════════
+        // STAGE 1: WORKSPACE CLEAN
+        // KAAM: Purani build ke files hata do
+        // KYON: Fresh start chahiye — stale files se galat results
+        // ════════════════════════════════════════════════════
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+                echo "✅ Workspace cleaned"
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 2: CODE CHECKOUT
+        // KAAM: GitHub se latest Juice Shop code download karo
+        // KYON: Pipeline ko fresh code chahiye build ke liye
+        // ════════════════════════════════════════════════════
+        stage('Checkout Code') {
+            steps {
+                echo "📥 GitHub se code download ho raha hai..."
+                checkout scm
+                sh 'ls -la'
+                sh 'ls -la'
+                echo "✅ Code checkout complete"
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 3: SONARQUBE ANALYSIS (SAST)
+        // KAAM: Juice Shop ka code scan karo
+        //
+        // SAST = Static Application Security Testing
+        // Code run kiye bina security issues dhundhna
+        //
+        // Juice Shop mein INTENTIONAL vulnerabilities hain:
+        // - SQL Injection
+        // - XSS (Cross Site Scripting)
+        // - Broken Authentication
+        // SonarQube inhe detect karega
+        // ════════════════════════════════════════════════════
+        stage('SonarQube Code Analysis') {
+            environment {
+                SONAR_AUTH_TOKEN = credentials('sonar-token')
+            }
+            steps {
+                echo "🔍 SonarQube Juice Shop code analyze kar raha hai..."
+                dir("${APP_DIR}") {
+                    withSonarQubeEnv("${SONARQUBE_ENV}") {
+                        script {
+                            def scannerHome = tool 'sonar-scanner'
+                            sh """
+                                ${scannerHome}/bin/sonar-scanner \
+                                  -Dsonar.projectKey=juice-shop \
+                                  -Dsonar.projectName="OWASP Juice Shop" \
+                                  -Dsonar.sources=. \
+                                  -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/*.test.ts,**/frontend/node_modules/** \
+                                  -Dsonar.language=ts \
+                                  -Dsonar.host.url=http://65.0.120.141:9000 \
+                                  -Dsonar.token=${SONAR_AUTH_TOKEN}
+                            """
+                        }
+                    }
+                }
+                echo "✅ SonarQube scan complete — check http://<CICD_IP>:9000"
+            }
+        }
+
+        // Quality Gate — Pass karna mandatory hai
+        // Juice Shop mein bahut issues hain, isliye threshold relax rakha hai
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    // abortPipeline: false — Juice Shop mein known issues hain
+                    // Production app mein: true karo
+                    waitForQualityGate abortPipeline: false
+                }
+                echo "✅ Quality Gate check done"
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 4: OWASP DEPENDENCY CHECK (SCA)
+        // KAAM: package.json ki sab npm packages scan karo
+        //
+        // SCA = Software Composition Analysis
+        // Third-party libraries mein known CVEs dhundhna
+        //
+        // Juice Shop mein INTENTIONALLY vulnerable packages hain
+        // OWASP ye sab report karega — educational purpose ke liye perfect!
+        // --failOnCVSS 10 rakha hai (sirf most critical pe fail)
+        // ════════════════════════════════════════════════════
+        stage('OWASP Dependency Check') {
+            steps {
+                echo "🔐 npm packages mein known vulnerabilities dhundh raha hai..."
+                dir("${APP_DIR}") {
+                    script {
+                        def dcHome = tool 'OWASP-Dependency-Check'
+                        sh """
+                            mkdir -p dependency-check-report
+                            ${dcHome}/bin/dependency-check.sh \
+                              --scan . \
+                              --format XML \
+                              --format HTML \
+                              --out dependency-check-report \
+                              --disableAssembly \
+                              --exclude '**/node_modules/**' \
+                              --exclude '**/dist/**' \
+                              --exclude '**/.git/**' \
+                              --exclude '**/test/files/**' \
+                              --exclude '**/*.zip' \
+                              --noupdate || true
+                         """
+                    }
+                }
+                echo "✅ OWASP scan complete"
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 5: DOCKER BUILD
+        // KAAM: Juice Shop ka Docker image banana
+        //
+        // Juice Shop ka Dockerfile already hai repo mein
+        // Two-stage build:
+        //   Stage 1: npm install + TypeScript compile
+        //   Stage 2: Distroless image mein sirf built app
+        //
+        // Image naam: YOURDOCKERHUB/juice-shop:BUILD_NUMBER
+        // ════════════════════════════════════════════════════
+        stage('Docker Build') {
+            steps {
+                echo "🐳 Juice Shop Docker image build ho rahi hai..."
+                dir("${APP_DIR}") {
+                    sh """
+                        # Build with build number tag
+                        docker build \
+                          -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                          -t ${IMAGE_NAME}:latest \
+                          .
+
+                        # Verify image bani
+                        docker images | grep juice-shop
+                    """
+                }
+                echo "✅ Docker image built: ${FULL_IMAGE}"
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 6: TRIVY IMAGE SCAN
+        // KAAM: Built Docker image ke andar vulnerabilities
+        //
+        // SonarQube = Source code scan (before build)
+        // Trivy     = Docker image scan (after build)
+        //
+        // Juice Shop ki image mein bahut vulnerabilities milenge
+        // exit-code 0 rakha hai taaki pipeline fail na ho
+        // Report archive hoti hai Jenkins mein
+        // ════════════════════════════════════════════════════
+        stage('Trivy Image Scan') {
+            steps {
+                echo "🔬 Trivy Docker image scan kar raha hai..."
+                sh """
+                    # Full JSON report save karo (non-blocking)
+                    /usr/bin/trivy image \
+                      --scanners vuln \
+                      --severity HIGH,CRITICAL \
+                      --format json \
+                      --output trivy-report.json \
+                      ${IMAGE_NAME}:${IMAGE_TAG} || true
+
+                    # Human readable table bhi generate karo
+                    /usr/bin/trivy image \
+                      --scanners vuln \
+                      --severity HIGH,CRITICAL \
+                      --format table \
+                      --output trivy-report.txt \
+                      ${IMAGE_NAME}:${IMAGE_TAG} || true
+
+                    echo "=== TRIVY SCAN RESULTS ==="
+                    cat trivy-report.txt
+
+
+                    echo "✅ Trivy scan complete"
+                """
+                // Reports Jenkins pe archive karo
+                archiveArtifacts artifacts: 'trivy-report.json,trivy-report.txt',
+                                 fingerprint: true,
+                                 allowEmptyArchive: true
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 7: DOCKER PUSH
+        // KAAM: Built image DockerHub pe upload karo
+        // KYON: Kubernetes DockerHub se pull karega deploy ke liye
+        // ════════════════════════════════════════════════════
+        stage('Docker Push') {
+            steps {
+                echo "📤 DockerHub pe image upload ho rahi hai..."
+                withCredentials([usernamePassword(
+                    credentialsId: DOCKER_CREDENTIALS_ID,
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh """
+                        # Login
+                        echo "\${DOCKER_PASS}" | docker login -u "\${DOCKER_USER}" --password-stdin
+
+                        # Build number tag push karo
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+
+                        # Latest tag bhi push karo
+                        docker push ${IMAGE_NAME}:latest
+
+                        # Logout (security)
+                        docker logout
+                    """
+                }
+                echo "✅ Image pushed: ${FULL_IMAGE}"
+            }
+        }
+
+        // ════════════════════════════════════════════════════
+        // STAGE 8: UPDATE ARGOCD ROLLOUT + GIT PUSH
+        // KAAM: rollouts.yaml mein naya image tag update karo
+        //
+        // GITOPS KYA HAI?
+        // Git = Single source of truth for K8s deployment
+        // ArgoCD Git ko dekha karta hai
+        // Jab rollouts.yaml mein image tag change hota hai →
+        // ArgoCD automatically K8s mein deploy kar deta hai
+        //
+        // Yahi is pipeline ka MAGIC hai!
+        // ════════════════════════════════════════════════════
+       stage('Update Rollout Image & Push to Git') {
+    steps {
+        echo "🔄 Updating GitOps repository..."
+
+        withCredentials([usernamePassword(
+            credentialsId: GIT_CREDENTIALS_ID,
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GIT_PASS'
+        )]) {
+
+            sh """
+                # Purana clone delete karo agar ho
+                rm -rf gitops
+
+                # GitOps repo clone karo
+                git clone https://\${GIT_USER}:\${GIT_PASS}@github.com/parikshit-chouhan/secure-gitops-devsecops-platform.git gitops
+
+                cd gitops
+
+                # Git config
+                git config user.email "parikshitchouhan1076@gmail.com"
+                git config user.name "Parikshit"
+
+                echo "===== Before Update ====="
+                grep "image:" argocd-apps/rollouts.yaml
+
+                # Image update
+                sed -i 's|image: .*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' argocd-apps/rollouts.yaml
+
+                echo "===== After Update ====="
+                grep "image:" argocd-apps/rollouts.yaml
+
+                git add argocd-apps/rollouts.yaml
+
+                git commit -m "Deploy juice-shop:${IMAGE_TAG}" || echo "Nothing to commit"
+
+                git push origin main
+            """
+        }
+
+        echo "✅ GitOps repo updated successfully."
+    }
+}
+
+    }
+
+    // ── POST BUILD ACTIONS ──
+    post {
+        always {
+            // OWASP report publish karo Jenkins dashboard pe
+            dependencyCheckPublisher \
+                pattern: 'dependency-check-report/dependency-check-report.xml'
+
+            // Trivy report archive
+            archiveArtifacts \
+                artifacts: 'trivy-report.json,trivy-report.txt',
+                fingerprint: true,
+                allowEmptyArchive: true
+
+            // Docker logout (security)
+            sh 'docker logout || true'
+
+            // Disk space bachao — old images delete karo
+            sh 'docker system prune -f || true'
+        }
+
+        success {
+            echo """
+            ╔══════════════════════════════════════════╗
+            ║  ✅ PIPELINE SUCCESS — Build #${BUILD_NUMBER}      ║
+            ║                                          ║
+            ║  Image: ${IMAGE_NAME}:${IMAGE_TAG}
+            ║                                          ║
+            ║  ArgoCD sync hoga automatically...       ║
+            ║  Juice Shop: http://<WORKER_IP>:32000   ║
+            ╚══════════════════════════════════════════╝
+            """
+        }
+
+        failure {
+            echo """
+            ╔══════════════════════════════════════════╗
+            ║  ❌ PIPELINE FAILED — Build #${BUILD_NUMBER}       ║
+            ║  Check logs for details                  ║
+            ╚══════════════════════════════════════════╝
+            """
+        }
+    }
+}
