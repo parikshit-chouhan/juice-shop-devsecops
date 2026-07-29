@@ -305,7 +305,7 @@ pipeline {
     stage('OWASP ZAP DAST Scan') {
     steps {
         sh '''
-        sudo docker run --rm \
+        docker run --rm \
         -v $(pwd):/zap/wrk \
         ghcr.io/zaproxy/zaproxy:stable \
         zap-baseline.py \
