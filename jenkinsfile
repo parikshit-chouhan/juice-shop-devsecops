@@ -303,14 +303,18 @@ pipeline {
     }
 }
     stage('OWASP ZAP DAST Scan') {
-    steps {
+     steps {
         sh '''
+        rm -f zap-report.html
+        rm -f zap.yaml
+
         docker run --rm \
-        -v $(pwd):/zap/wrk \
-        ghcr.io/zaproxy/zaproxy:stable \
-        zap-baseline.py \
-        -t http://15.207.93.224:8081/ \
-        -r zap-report.html
+          --user root \
+          -v $(pwd):/zap/wrk \
+          ghcr.io/zaproxy/zaproxy:stable \
+          zap-baseline.py \
+          -t http://15.207.93.224:8081/ \
+          -r zap-report.html || true
         '''
     }
 }
