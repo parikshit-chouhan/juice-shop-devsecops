@@ -81,7 +81,7 @@ pipeline {
                                   -Dsonar.sources=. \
                                   -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/*.test.ts,**/frontend/node_modules/** \
                                   -Dsonar.language=ts \
-                                  -Dsonar.host.url=13.202.184.195:9000 \
+                                  -Dsonar.host.url=http://13.202.184.195:9000 \
                                   -Dsonar.token=${SONAR_AUTH_TOKEN}
                             """
                         }
