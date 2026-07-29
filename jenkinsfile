@@ -18,6 +18,8 @@ pipeline {
         GITHUB_REPO            = "https://github.com/parikshit-chouhan/secure-gitops-devsecops-platform.git"
         GIT_CREDENTIALS_ID     = "github-token"
         APP_DIR                = "."   // Juice Shop code yahan hai
+        DEFECTDOJO_URL = "http://13.202.184.195:8080"
+        ENGAGEMENT_ID  = "1"
     }
 
     stages {
@@ -300,6 +302,28 @@ pipeline {
         echo "✅ GitOps repo updated successfully."
     }
 }
+    stage('OWASP ZAP DAST Scan') {
+    steps {
+        sh '''
+        sudo docker run --rm \
+        -v $(pwd):/zap/wrk \
+        ghcr.io/zaproxy/zaproxy:stable \
+        zap-baseline.py \
+        -t http://15.207.93.224:8081/ \
+        -r zap-report.html
+        '''
+    }
+}
+
+    stage('Archive ZAP Report') {
+
+            steps {
+
+                archiveArtifacts artifacts: 'zap-report.html',
+                allowEmptyArchive: true
+
+            }
+        }
 
     }
 
@@ -316,11 +340,36 @@ pipeline {
                 fingerprint: true,
                 allowEmptyArchive: true
 
+            archiveArtifacts artifacts: 'zap-report.html'
             // Docker logout (security)
             sh 'docker logout || true'
 
             // Disk space bachao — old images delete karo
             sh 'docker system prune -f || true'
+
+            // show owaps zap report in jenkins 
+            publishHTML(
+                target: [
+                    allowMissing: false,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: '.',
+                    reportFiles: 'zap-report.html',
+                    reportName: 'OWASP ZAP Security Report'
+                ]
+            )
+            
+            publishHTML(
+                target: [
+                    allowMissing: false,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'dependency-check-report',
+                    reportFiles: 'dependency-check-report.html',
+                    reportName: 'OWASP Dependency Check Report'
+                ]
+            ) 
+            
         }
 
         success {
