@@ -304,6 +304,7 @@ pipeline {
 }
     stage('OWASP ZAP DAST Scan') {
      steps {
+        
         sh '''
         rm -f zap-report.html
         rm -f zap.yaml
@@ -314,6 +315,7 @@ pipeline {
           ghcr.io/zaproxy/zaproxy:stable \
           zap-baseline.py \
           -t http://15.207.93.224:8081/ \
+          -J zap-report.json \
           -r zap-report.html || true
         '''
     }
@@ -328,6 +330,70 @@ pipeline {
 
             }
         }
+
+    stage('Upload Dependency Check to DefectDojo') {
+    steps {
+        withCredentials([string(
+            credentialsId: 'DEFECTDOJO_API_TOKEN',
+            variable: 'DD_TOKEN'
+        )]) {
+            echo 'Pushing Dependency Check report to DefectDojo...'
+            sh '''
+            curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DD_TOKEN" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_type=Dependency Check Scan" \
+              -F "file=@dependency-check-report/dependency-check-report.xml" \
+              -F "active=true" \
+              -F "verified=true" \
+              -F "close_old_findings=false"
+            '''
+        }
+    }
+}
+    stage('Upload Trivy Report') {
+
+    steps {
+
+        withCredentials([string(
+            credentialsId: 'DEFECTDOJO_API_TOKEN',
+            variable: 'DD_TOKEN'
+        )]) {
+            echo 'Pushing Trivy Report to DefectDojo...'
+            sh '''
+            curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DD_TOKEN" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_type=Trivy Scan" \
+              -F "file=@trivy-report.json" \
+              -F "active=true" \
+              -F "verified=true"
+            '''
+        }
+    }
+}
+
+    stage('Upload ZAP Report') {
+
+    steps {
+
+        withCredentials([string(
+            credentialsId: 'DEFECTDOJO_API_TOKEN',
+            variable: 'DD_TOKEN'
+        )]) {
+            echo 'Pushing ZAP Report to DefectDojo...'
+            sh '''
+            curl -X POST "$DEFECTDOJO_URL/api/v2/import-scan/" \
+              -H "Authorization: Token $DD_TOKEN" \
+              -F "engagement=$ENGAGEMENT_ID" \
+              -F "scan_type=ZAP Scan" \
+              -F "file=@zap-report.json" \
+              -F "active=true" \
+              -F "verified=true"
+            '''
+        }
+    }
+}
 
     }
 
